@@ -1,4 +1,5 @@
 #pragma once
+#include <string_view>
 #include <vector>
 #include <filesystem>
 
@@ -17,6 +18,7 @@ namespace fastbuild {
 
     void add_dependency(std::string_view dep) { dependencies_.emplace_back(std::string(dep));}
     void add_remote(RemoteDep&& dep) { remotes_.push_back(std::move(dep)); }
+    static bool add_target(const fs::path& root, std::string_view target_name, bool is_lib);
 
     bool generate_basic();
     void generate_raylib();

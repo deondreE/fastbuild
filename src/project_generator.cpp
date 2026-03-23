@@ -1,6 +1,7 @@
 #include "project_generator.hpp"
 #include "common.hpp"
 #include "template_manager.hpp"
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
@@ -83,6 +84,32 @@ bool ProjectGenerator::generate_basic() {
     }
 }
 
+bool ProjectGenerator::add_target(const fs::path& root, std::string_view target_name, bool is_lib) {
+    try {
+        fs::path meson_file = root / "meson.build";
+        if (!fs::exists(meson_file)) return false;
+
+        std::string folder = is_lib ? "src/lib" : "src";
+        fs::create_directories(root / folder);
+
+        std::string src_path = std::format("{}/{}.cpp", folder, target_name);
+        std::string content = is_lib ? "// Library source\n" : "#include \"pch.hpp\"\nint main() { return 0; }\n";
+        write_file(root / src_path, content);
+
+        std::ofstream ofs(meson_file, std::ios::app);
+        std::string build_block = is_lib ?
+            std::format("\nlibrary('{}', '{}', include_directories: inc, dependencies: project_deps)\n", target_name, src_path) :
+            std::format("\nexecutable('{}', '{}', include_directories: inc, dependencies: project_deps, cpp_pch: 'pch/pch.hpp')\n", target_name, src_path);
+        ofs << build_block;
+
+        ui::log(ui::Level::SUCCESS, std::format("Added {} target: {}", is_lib ? "library" : "executable", target_name));
+        return true;
+    } catch (const std::exception& e) {
+        ui::log(ui::Level::ERROR, e.what());
+        return false;
+    }
+}
+
 void ProjectGenerator::generate_raylib() {
     add_dependency("raylib");
 
@@ -133,12 +160,18 @@ bool ProjectGenerator::inject_dependency(const fs::path& root, std::string_view 
              return false;
         }
 
-        std::string updated = match[1].str() + match[2].str() +
-                              std::format("  dependency('{}'),\n", dep) +
-                              match[3].str();
+        std::string updated =
+            match.prefix().str() +
+            match[1].str() +
+            match[2].str() +
+            std::format("  dependency('{}'),\n", dep) +
+            match[3].str() +
+            match.suffix().str();
 
-        // This works only if write_file is static!
+        // Write the full reconstructed content back
         write_file(meson_file, updated);
+
+        ui::log(ui::Level::SUCCESS, std::format("Added dependency '{}' to meson.build", dep));
         return true;
     } catch (const std::exception& e) {
         ui::log(ui::Level::ERROR, e.what());

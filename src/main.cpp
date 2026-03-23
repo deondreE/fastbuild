@@ -1,4 +1,5 @@
 #include "project_generator.hpp"
+#include "system_check.hpp"
 #include "file_watcher.hpp"
 #include <fstream>
 #include <iostream>
@@ -118,19 +119,35 @@ int main(int argc, char* argv[]) {
 
     try {
         if (argc > 1) {
-            std::string command = args[1];
+            std::string cmd = args[1];
 
-            if (command == "--watch") {
+            if (cmd == "doctor") {
+                fastbuild::cli::run_doctor();
+                return 0; // Exit after command
+            }
+            else if (cmd == "add-exe" && argc >= 3) {
+                ProjectGenerator::add_target(".", args[2], false);
+                return 0; // Exit after command
+            }
+            else if (cmd == "add-lib" && argc >= 3) {
+                ProjectGenerator::add_target(".", args[2], true);
+                return 0; // Exit after command
+            }
+            else if (cmd == "--watch") {
                 fastbuild::cli::run_watcher(args);
-                return 0;
+                return 0; // Exit after command
+            }
+            else if (cmd == "add" && argc >= 3) {
+                ProjectGenerator::inject_dependency(".", args[2]);
+                return 0; // Exit after command
             }
 
-            if (command == "add" && argc >= 3) {
-                return ProjectGenerator::inject_dependency(".", args[2]) ? 0 : 1;
-            }
+            // If we got here, a command was provided but not recognized
+            std::cerr << "\033[1;31mUnknown command: " << cmd << "\033[0m\n";
+            return 1;
         }
 
-        // Default: Scaffolding Mode
+        // If no arguments were provided (argc == 1), run scaffold
         fastbuild::cli::handle_scaffold();
 
     } catch (const std::exception& e) {
