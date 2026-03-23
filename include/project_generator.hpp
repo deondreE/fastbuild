@@ -1,42 +1,33 @@
 #pragma once
-
-#include <string>
 #include <vector>
 #include <filesystem>
 
-enum class ProjectTemplate {
-  BASIC,
-  RAYLIB,
-  LINUX_APP
-};
+namespace fastbuild {
+  namespace fs = std::filesystem;
 
-struct RemoteDep {
+  struct RemoteDep {
     std::string name;
     std::string url;
     std::string revision;
-};
+  };
 
-class ProjectGenerator {
-public:
-ProjectGenerator(const std::string& name,
-                const std::vector<std::string>& local_deps,
-                const std::vector<RemoteDep>& remote_deps);
-    bool generate();
+  class ProjectGenerator {
+  public:
+    explicit ProjectGenerator(std::string_view name) : name_(name) {}
 
-    static bool add_local_dep(const std::string& projectRoot, const std::string& depName);
-    static bool add_remote_dep(const std::string& projectRoot, const RemoteDep& rd);
+    void add_dependency(std::string_view dep) { dependencies_.emplace_back(std::string(dep));}
+    void add_remote(RemoteDep&& dep) { remotes_.push_back(std::move(dep)); }
 
-private:
-   std::string projectName;
-   std::vector<std::string> dependencies;
-   std::vector<RemoteDep> remoteDeps;
+    bool generate_basic();
+    void generate_raylib();
 
-   void create_directories();
-   void create_meson_file();
-   void create_dummy_source();
-   void create_dx_configs();
-   void create_editor_configs();
-   void create_gitignore();
-   void fetch_remote_wraps();
-   void setup_raylib_deps();
-};
+    static bool inject_dependency(const fs::path& root, std::string_view dep);
+  private:
+    std::string name_;
+    std::vector<std::string> dependencies_;
+    std::vector<RemoteDep> remotes_;
+
+    static void write_file(const fs::path& path, std::string_view content);
+    std::string build_meson_content();
+  };
+}
