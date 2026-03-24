@@ -1,11 +1,14 @@
 #include "project_generator.hpp"
 #include "common.hpp"
 #include "template_manager.hpp"
+#include <cctype>
+#include <cstddef>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <format>
 #include <regex>
@@ -14,20 +17,36 @@
 
 namespace fastbuild {
 
-std::string glob_cpp_files(const fs::path& root, const std::string& folder) {
+static std::string glob_cpp_files(const fs::path& root, const std::string& search_path) {
     std::string files_list = "files(\n";
-    fs::path search_path = root / folder;
+    bool found_any = false;
 
     if (fs::exists(search_path)) {
+        std::vector<fs::path> paths;
         for (const auto& entry : fs::recursive_directory_iterator(search_path)) {
-            if (entry.path().extension() == ".cpp") {
-                std::string relative_path = fs::relative(entry.path(), root).string(); 
-                files_list += std::format("   '{}',\n", relative_path);
+            if (entry.is_regular_file( ) && entry.path().extension() == ".cpp") {
+                paths.push_back(entry.path());
             }
         }
+        std::sort(paths.begin(), paths.end());
+
+        for (const auto& p : paths) {
+            std::string rel = fs::relative(p, root).generic_string();
+            files_list += std::format("    '{}',\n", rel);
+            found_any = true;
+        }
     }
-    files_list += ")";
+
+    if (!found_any) files_list += "  #no sources yet!\n";
+    files_list += "  )";
     return files_list;
+}
+
+static std::string read_file(const fs::path& path) {
+    std::ifstream ifs(path);
+    if (!ifs) throw std::runtime_error("Cannot open: " + path.string());
+    return {std::istreambuf_iterator<char>(ifs),
+            std::istreambuf_iterator<char>()};
 }
 
 void ProjectGenerator::write_file(const fs::path& path, std::string_view content) {
@@ -66,7 +85,6 @@ add_project_arguments(cpp.get_supported_arguments([
 
 {{DEPS_LIST}}
 
-# This allows #include "pch.hpp" to work
 inc = include_directories('include')
 
 executable('{{PROJECT_NAME}}',
@@ -409,81 +427,311 @@ bool ProjectGenerator::generate_basic() {
     }
 }
 
-bool ProjectGenerator::add_target(const fs::path& root, std::string_view target_name, bool is_lib) {
-    try {
-        fs::path meson_file = root / "meson.build";
-        if (!fs::exists(meson_file)) return false;
+static bool has_natvie_meson(std::string_view name) {
+    // has meson.build or CMakeLists.txt files.
+    static const std::vector<std::string_view> known = {
+          "fmt", "spdlog", "catch2", "doctest", "nlohmann_json",
+          "zlib", "libpng", "freetype2", "sdl2", "sdl3", "glfw",
+          "glm", "vulkan-headers", "openal-soft",  
+    };
 
-        std::string folder = is_lib ? "src/lib" : "src";
-        fs::create_directories(root / folder);
+    for (auto k : known)
+        if (k == name) return true;
+    return false;
+} 
 
-        std::string src_path = std::format("{}/{}.cpp", folder, target_name);
-        std::string content = is_lib ? "// Library source\n" : "#include \"pch/pch.hpp\"\n\nint main() {\n    return 0;\n}\n";
-        write_file(root / src_path, content);
+static std::string dep_variable_name(std::string_view name) {
+  static const std::map<std::string_view, std::string_view> overrides = {
+      {"nlohmann_json", "nlohmann_json_dep"},
+      {"catch2", "catch2_with_main_dep"},
+      {"freetype2", "freetype_dep"},
+      {"openal-soft", "openal_dep"},
+  };
+  auto it = overrides.find(name);
+  if (it != overrides.end()) return std::string(it->second);
 
-        std::ifstream ifs(meson_file);
-        std::string existing_content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-        ifs.close();
+  std::string var(name);
+  std::replace(var.begin(), var.end(), '-', '_');
+  return var + "_dep";
+}
 
-        if (is_lib) {
-            std::string dep_var = std::format("{}_dep", target_name);
-            std::string lib_build_block = std::format(
-                "{0}_lib = library('{1}', '{2}', include_directories: inc, dependencies: project_deps)\n"
-                "{0}_dep = declare_dependency(link_with: {0}_lib, include_directories: inc)\n\n",
-                target_name, target_name, src_path);
+void ProjectGenerator::write_wrap_file(const fs::path& path, const RemoteDep& rd) {
+    fs::path subprojects_dir = path / "subprojects";
+    fs::create_directories(subprojects_dir);
 
-            size_t exe_pos = existing_content.find("executable(");
-            if (exe_pos != std::string::npos) {
-                existing_content.insert(exe_pos, lib_build_block);
+    std::string dep_var = dep_variable_name(rd.name);
 
-                std::regex dep_pattern(R"(dependencies\s*:\s*(?:\[([^\]]*)\]|([a-zA-Z0-9_]+)))");
-                std::smatch match;
-                std::string exe_part = existing_content.substr(exe_pos + lib_build_block.length());
-                
-                if (std::regex_search(exe_part, match, dep_pattern)) {
-                    std::string new_dep_list;
-                    
-                    if (match[1].matched) { // It was already an array [item1, item2]
-                        std::string current_items = match[1].str();
-                        if (current_items.find(dep_var) == std::string::npos) {
-                            std::string sep = (current_items.empty() || current_items.back() == ' ') ? "" : ", ";
-                            new_dep_list = std::format("[{}{}{}]", current_items, sep, dep_var);
-                        }
-                    } else if (match[2].matched) { // It was a single variable like project_deps
-                        std::string var_name = match[2].str();
-                        if (var_name != dep_var) {
-                            new_dep_list = std::format("[{}, {}]", var_name, dep_var);
-                        }
-                    }
+    if (has_natvie_meson(rd.name)) {
+      std::string wrap = std::format("[wrap-git]\n"
+                                     "url      = {}\n"
+                                     "revision = {}\n"
+                                     "depth    = 1\n"
+                                     "\n"
+                                     "[provide]\n"
+                                     "{} = {}\n",
+                                     rd.url, rd.revision, rd.name, dep_var);
 
-                    if (!new_dep_list.empty()) {
-                        std::string full_replacement = "dependencies : " + new_dep_list;
-                        exe_part.replace(match.position(), match.length(), full_replacement);
-                        
-                        // Reconstruct the full content
-                        existing_content = existing_content.substr(0, exe_pos + lib_build_block.length()) + exe_part;
-                    }
-                }
-            } else {
-                existing_content += "\n" + lib_build_block;
-            }
-        } else {
-            // Adding a standard executable
-            std::string exe_block = std::format(
-                "\nexecutable('{}',\n  '{}',\n  include_directories : inc,\n  dependencies : [project_deps],\n  cpp_pch : 'pch/pch.hpp'\n)\n",
-                target_name, src_path);
-            existing_content += exe_block;
+        write_file(subprojects_dir / (rd.name + ".wrap"), wrap);
+        ui::log(ui::Level::SUCCESS, std::format("Wrap written for '{}' (native meson.build, dep var: {})", rd.name, dep_var));
+    } else {
+        fs::path patch_dir = subprojects_dir / "packagefiles" / rd.name;
+        fs::create_directories(patch_dir);
+
+        std::string synth = sythesize_meson(rd.name);
+        write_file(patch_dir / "meson.build", synth);
+
+        
+      std::string wrap = std::format("[wrap-git]\n"
+                                     "url      = {}\n"
+                                     "revision = {}\n"
+                                     "depth    = 1\n"
+                                     "patch_directory = {}\n"
+                                     "\n"
+                                     "[provide]\n"
+                                     "{} = {}\n",
+                                     rd.url, rd.revision, rd.name, rd.name, dep_var);
+            write_file(subprojects_dir / (rd.name + ".wrap"), wrap);
+            ui::log(ui::Level::SUCCESS, std::format("Wrap + Synthetic meson.build written for '{}' (dep_var: {})", rd.name, dep_var));
+    }
+}
+
+std::string ProjectGenerator::sythesize_meson(std::string_view name) {
+        if (name == "imgui") {
+        return R"(project('imgui', 'cpp', version : '1.x')
+cpp = meson.get_compiler('cpp')
+fs  = import('fs')
+inc = include_directories('.', 'backends')
+ 
+src = files(
+  'imgui.cpp',
+  'imgui_draw.cpp',
+  'imgui_tables.cpp',
+  'imgui_widgets.cpp',
+  'imgui_demo.cpp'
+)
+deps = []
+ 
+# Backend auto-detection: probe for deps, skip silently if absent.
+# No meson_options.txt needed - subprojects cannot declare options that
+# the parent hasn't pre-declared, so get_option() is forbidden here.
+ 
+glfw_dep = dependency('glfw3', required : false)
+if glfw_dep.found() and fs.exists('backends/imgui_impl_glfw.cpp')
+  src  += files('backends/imgui_impl_glfw.cpp')
+  deps += [glfw_dep]
+endif
+ 
+vulkan_dep = dependency('vulkan', required : false)
+if vulkan_dep.found() and fs.exists('backends/imgui_impl_vulkan.cpp')
+  src  += files('backends/imgui_impl_vulkan.cpp')
+  deps += [vulkan_dep]
+endif
+ 
+sdl2_dep = dependency('sdl2', required : false)
+if sdl2_dep.found() and fs.exists('backends/imgui_impl_sdl2.cpp')
+  src  += files('backends/imgui_impl_sdl2.cpp')
+  deps += [sdl2_dep]
+endif
+ 
+if fs.exists('backends/imgui_impl_opengl3.cpp')
+  src += files('backends/imgui_impl_opengl3.cpp')
+endif
+ 
+imgui_lib = static_library('imgui', src,
+  include_directories : inc,
+  dependencies        : deps)
+ 
+imgui_dep = declare_dependency(
+  link_with           : imgui_lib,
+  include_directories : inc,
+  dependencies        : deps)
+)";
+    }
+    // stb — header-only
+    if (name == "stb") {
+        return R"(project('stb', 'cpp', version : '1.0')
+stb_dep = declare_dependency(include_directories : include_directories('.'))
+)";
+    }
+ 
+    // Generic header-only fallback
+    return std::format(
+        "project('{0}', 'cpp', version : '0.1')\n"
+        "{1} = declare_dependency(include_directories : include_directories('.'))\n",
+        name, dep_variable_name(name));
+}
+
+bool ProjectGenerator::add_target(
+  const fs::path &root,
+  std::string_view target_name,
+  bool is_lib
+) {
+  try {
+    fs::path meson_file = root / "meson.build";
+    if (!fs::exists(meson_file)) {
+      ui::log(ui::Level::ERROR, "No meson.build found in: " + root.string());
+      return false;
+    }
+
+    fs::path src_dir = is_lib ? root / "src" / "lib" : root / "src";
+    fs::create_directories(src_dir);
+    fs::path src_file = src_dir / (std::string(target_name) + ".cpp");
+
+    if (!fs::exists(src_file)) {
+      std::string stub = is_lib ? std::format(
+                                    "// {0} library\n#pragma once\n",
+                                    target_name
+                                  )
+                                : "#include \"pch/pch.hpp\"\n\nint main() {\n "
+                                  "return 0;\n}\n";
+      write_file(src_file, stub);
+    }
+
+    std::string rel_src = fs::relative(src_file, root).generic_string();
+    std::string content = read_file(meson_file);
+
+    if (content.find(std::format("'{}'", target_name)) != std::string::npos) {
+      ui::log(
+        ui::Level::WARN,
+        std::format("Target '{}' already present in meson.build", target_name)
+      );
+      return false;
+    }
+
+    std::string block;
+    if (is_lib) {
+      block = std::format(
+        "\n# --- {0} library ---\n"
+        "{0}_lib = static_library('{0}',\n"
+        "  '{1}',\n"
+        "  include_directories : inc,\n"
+        "  dependencies        : project_deps\n"
+        ")\n"
+        "{0}_dep = declare_dependency(\n"
+        "  link_with           : {0}_lib,\n"
+        "  include_directories : inc\n"
+        ")\n",
+        target_name,
+        rel_src
+      );
+
+      // Insert library before the first executable definition if it exists
+      std::size_t exe_pos = content.find("\nexecutable(");
+      if (exe_pos != std::string::npos) {
+        content.insert(exe_pos + 1, block);
+      } else {
+        content += block;
+      }
+
+      // Inject the new dependency into existing executable declarations
+      content = inject_dep_into_executable(
+        content,
+        std::string(target_name) + "_dep"
+      );
+    } else {
+      block = std::format(
+        "\n# --- {0} executable ---\n"
+        "executable('{0}',\n"
+        "  '{1}',\n"
+        "  include_directories : inc,\n"
+        "  dependencies        : project_deps,\n"
+        "  cpp_pch             : 'pch/pch.hpp'\n"
+        ")\n",
+        target_name,
+        rel_src
+      );
+      content += block;
+    }
+
+    write_file(meson_file, content);
+    ui::log(
+      ui::Level::SUCCESS,
+      std::format(
+        "Added {} target: {}",
+        is_lib ? "library" : "executable",
+        target_name
+      )
+    );
+    return true;
+  } catch (const std::exception &e) {
+    ui::log(ui::Level::ERROR, e.what());
+    return false;
+  }
+}
+
+std::string ProjectGenerator::inject_dep_into_executable(const std::string& content, const std::string& dep_var) {
+    std::string result;
+    result.reserve(content.size() + 128);
+
+    std::size_t pos = 0;
+    while (pos < content.size()) {
+        // Find the executable( token
+        std::size_t exe_start = content.find("executable(", pos);
+        if (exe_start == std::string::npos) {
+            result += content.substr(pos);
+            break;
         }
 
-        std::ofstream ofs(meson_file, std::ios::trunc);
-        ofs << existing_content;
+        // Copy
+        result += content.substr(pos, exe_start - pos + /*len("executable(")*/ 11);
+        pos = exe_start + 11;
 
-        ui::log(ui::Level::SUCCESS, std::format("Added {} target: {}", is_lib ? "library" : "executable", target_name));
-        return true;
-    } catch (const std::exception& e) {
-        ui::log(ui::Level::ERROR, e.what());
-        return false;
+        int depth = 1;
+        std::size_t body_start = pos;
+        while (pos < content.size() && depth > 0) {
+            if (content[pos] == '(') ++depth;
+            else if (content[pos] == ')') --depth;
+            ++pos;
+        }
+        std::string body = content.substr(body_start, pos - body_start - 1);
+
+        if (body.find(dep_var)!= std::string::npos) {
+            result += body + ")";
+            continue;
+        }
+
+        // find `dependencies :` inside the body
+        std::regex dep_key(R"(dependencies\s*:\s*)");
+        std::smatch m;
+        if (!std::regex_search(body, m, dep_key)) {
+            result += body + ",\n  dependencies : [" + dep_var + "])";
+            continue;
+        }
+
+        std::size_t after_key = m.position() + m.length();
+        char first_nonspace = 0;
+        std::size_t value_start = after_key;
+        while (value_start < body.size() && std::isspace((unsigned char)body[value_start]))
+            ++value_start;
+
+        if (value_start < body.size())
+            first_nonspace = body[value_start];
+
+        if (first_nonspace == '[') {
+            // Array form: `dependencies [a, b]` -> `dependencies : [a, b, dep_var]`
+            std::size_t bracket_close = body.find(']', value_start);
+            if (bracket_close != std::string::npos) {
+                std::size_t insert_at = bracket_close;
+                while (insert_at > value_start && (body[insert_at - 1] == ' ' || body[insert_at - 1] == '\n' || body[insert_at - 1] == '\t'))
+                    --insert_at;
+
+                bool has_coma = (insert_at > value_start && body[insert_at - 1] == ',');
+                std::string sep = has_coma ? " " : ", ";
+                body.insert(insert_at, sep + dep_var);
+            }
+        } else {
+            // single var declaration dependencies : project_deps
+            std::size_t var_end = value_start;
+            while (var_end < body.size() && (std::isalnum((unsigned char)body[var_end]) || body[var_end] == '_'))
+                ++var_end;
+            std::string orig_var = body.substr(value_start, var_end - value_start);
+            body.replace(value_start, var_end - value_start, "[" + orig_var + ", " + dep_var + "]");
+        }
+
+        result += body + ")";
     }
+
+    return result;
 }
 
 bool ProjectGenerator::inject_dependency_string(const fs::path& root, std::string_view raw_line) {
@@ -496,7 +744,6 @@ bool ProjectGenerator::inject_dependency_string(const fs::path& root, std::strin
         ifs.close();
 
         std::regex dep_regex(R"(project_deps\s*=\s*\[([\s\S]*?)\n\])");
-
         std::smatch match;
         if (!std::regex_search(content, match, dep_regex)) {
              ui::log(ui::Level::WARN, "Could not find 'project_deps' array in meson.build");
@@ -533,77 +780,13 @@ bool ProjectGenerator::inject_dependency(const fs::path& root, std::string_view 
 
 bool ProjectGenerator::inject_remote(const fs::path& root, const RemoteDep& rd) {
     try {
-        fs::path subprojects_dir = root / "subprojects";
-        fs::path patch_dir = subprojects_dir / "packagefiles" / rd.name;
-        fs::create_directories(patch_dir);
+        ProjectGenerator gen("__inject__");
+        gen.write_wrap_file(root, rd); 
 
-        std::string wrap_content = std::format(
-            "[wrap-git]\n"
-            "url = {}\n"
-            "revision = {}\n"
-            "depth = 1\n"
-            "patch_directory = {}\n" 
-            "\n"
-            "[provide]\n"
-            "{} = {}_dep\n",
-            rd.url, rd.revision, rd.name, rd.name, rd.name
-        );
-        write_file(subprojects_dir / (rd.name + ".wrap"), wrap_content);
-
-        std::string synth_meson;
-        if (rd.name == "imgui") {
-            synth_meson = R"(project('imgui', 'cpp', version : '1.89')
-cpp = meson.get_compiler('cpp')
-imgui_inc = include_directories('.', 'backends')
-imgui_deps = [dependency('vulkan')]
-imgui_src = files(
-    'imgui.cpp',
-    'imgui_draw.cpp',
-    'imgui_widgets.cpp',
-    'imgui_tables.cpp',
-    'imgui_demo.cpp',
-    'backends/imgui_impl_glfw.cpp',
-    'backends/imgui_impl_vulkan.cpp'
-)
-
-if host_machine.system() == 'windows'
-    imgui_src += files('backends/imgui_impl_dx12.cpp', 'backends/imgui_impl_win32.cpp')
-    imgui_deps += [cpp.find_library('d3d12'), cpp.find_library('dxgi'), cpp.find_library('d3dcompiler')]
-endif
-
-imgui_lib = static_library('imgui',
-    imgui_src,
-    include_directories : imgui_inc,
-    dependencies : imgui_deps
-)
-
-imgui_dep = declare_dependency(
-    link_with : imgui_lib,
-    include_directories : imgui_inc,
-    dependencies : imgui_deps
-)
-)";
-        }
-        else if (rd.name == "stb") {
-         synth_meson = R"(project('stb', 'cpp', version : '1.0')
-stb_inc = include_directories('.')
-stb_dep = declare_dependency(include_directories : stb_inc)
-)";
-        }
-        else {
-            synth_meson = std::format(
-                "project('{0}', 'cpp', version : '0.1')\n"
-                "{0}_inc = include_directories('.')\n"
-                "{0}_dep = declare_dependency(include_directories : {0}_inc)\n",
-                rd.name
-            );
-        }
-
-         write_file(patch_dir / "meson.build", synth_meson);
-
-        std::string line = std::format("  dependency('{}', fallback: ['{}', '{}_dep']),\n",
-                                           rd.name, rd.name, rd.name);
-
+        std::string dep_var = dep_variable_name(rd.name);
+        std::string line =
+            std::format("  dependency('{}', fallback: ['{}', '{}']),\n",
+                        rd.name, rd.name, dep_var);
         return inject_dependency_string(root, line);
     } catch (const std::exception& e) {
         ui::log(ui::Level::ERROR, e.what());

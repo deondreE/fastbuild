@@ -44,6 +44,9 @@ namespace fastbuild {
     std::vector<RemoteDep> remotes_;
 
     static void write_file(const fs::path& path, std::string_view content);
+    void write_wrap_file(const fs::path& path, const RemoteDep& rd);
+    std::string sythesize_meson(std::string_view name);
+   static std::string inject_dep_into_executable(const std::string& content, const std::string& dep_var);
     std::string build_meson_content();
   };
 }
