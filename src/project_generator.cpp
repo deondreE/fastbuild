@@ -69,8 +69,26 @@ bool ProjectGenerator::generate_basic() {
         fs::create_directories(root / "src");
         fs::create_directories(root / "include");
         fs::create_directories(root / "pch");
+        fs::create_directories(root / "subprojects");
 
         write_file(root / "meson.build", build_meson_content());
+
+        for (const auto& rd : remotes_) {
+            std::string wrap_content = std::format(
+                "[wrap-git]\n"
+                "url = {}\n"
+                "revision = {}\n"
+                "depth = 1\n"
+                "\n"
+                "[provide]\n"
+                "{} = {}_dep\n",
+                rd.url, rd.revision, rd.name, rd.name
+            );
+
+            fs::path wrap_path = root / "subprojects" / (rd.name + ".wrap");
+            write_file(wrap_path, wrap_content);
+        }
+
         write_file(root / "pch/pch.hpp", "#include <iostream>\n#include <vector>\n");
 
         write_file(root / "src/main.cpp",
@@ -92,14 +110,16 @@ bool ProjectGenerator::add_target(const fs::path& root, std::string_view target_
         std::string folder = is_lib ? "src/lib" : "src";
         fs::create_directories(root / folder);
 
+        // Fix path to use the target name correctly
         std::string src_path = std::format("{}/{}.cpp", folder, target_name);
-        std::string content = is_lib ? "// Library source\n" : "#include \"pch.hpp\"\nint main() { return 0; }\n";
+        std::string content = is_lib ? "// Library source\n" : "#include \"pch/pch.hpp\"\n\nint main() {\n    return 0;\n}\n";
         write_file(root / src_path, content);
 
         std::ofstream ofs(meson_file, std::ios::app);
         std::string build_block = is_lib ?
             std::format("\nlibrary('{}', '{}', include_directories: inc, dependencies: project_deps)\n", target_name, src_path) :
             std::format("\nexecutable('{}', '{}', include_directories: inc, dependencies: project_deps, cpp_pch: 'pch/pch.hpp')\n", target_name, src_path);
+
         ofs << build_block;
 
         ui::log(ui::Level::SUCCESS, std::format("Added {} target: {}", is_lib ? "library" : "executable", target_name));
@@ -110,73 +130,74 @@ bool ProjectGenerator::add_target(const fs::path& root, std::string_view target_
     }
 }
 
-void ProjectGenerator::generate_raylib() {
-    add_dependency("raylib");
-
-    if (!generate_basic()) return;
-
-    try {
-        std::string raylib_main = R"(#include "pch.hpp"
-#include <raylib.h>
-
-int main() {
-    InitWindow(800, 450, "FastBuild Raylib Game");
-    SetTargetFPS(60);
-
-    while (!WindowShouldClose()) {
-        BeginDrawing();
-        ClearBackground(RAYWHITE);
-        DrawText("Congrats! Your Raylib game is running!", 190, 200, 20, LIGHTGRAY);
-        EndDrawing();
-    }
-
-    CloseWindow();
-    return 0;
-}
-)";
-        fs::path main_path = fs::path(name_) / "src" / "main.cpp";
-        write_file(main_path, raylib_main);
-    } catch (const std::exception& e) {
-        ui::log(ui::Level::ERROR, e.what());
-    }
-}
-
-bool ProjectGenerator::inject_dependency(const fs::path& root, std::string_view dep) {
+bool ProjectGenerator::inject_dependency_string(const fs::path& root, std::string_view raw_line) {
     try {
         fs::path meson_file = root / "meson.build";
         if (!fs::exists(meson_file)) return false;
 
         std::ifstream ifs(meson_file);
-        if (!ifs) return false;
-
         std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
         ifs.close();
 
-        std::regex dep_regex(R"((project_deps\s*=\s*\[)([^\]]*)(\]))");
-        std::smatch match;
+        std::regex dep_regex(R"(project_deps\s*=\s*\[([\s\S]*?)\n\])");
 
+        std::smatch match;
         if (!std::regex_search(content, match, dep_regex)) {
              ui::log(ui::Level::WARN, "Could not find 'project_deps' array in meson.build");
              return false;
         }
 
-        std::string updated =
-            match.prefix().str() +
-            match[1].str() +
-            match[2].str() +
-            std::format("  dependency('{}'),\n", dep) +
-            match[3].str() +
-            match.suffix().str();
+        std::string array_content = match[1].str();
+        if (array_content.find(raw_line) != std::string::npos) {
+            ui::log(ui::Level::WARN, "Dependency already exists in project_deps");
+            return false;
+        }
 
-        // Write the full reconstructed content back
+        // Build updated content
+        std::string updated = std::regex_replace(
+            content,
+            dep_regex,
+            std::string("project_deps = [\n") + array_content + std::string(raw_line) + "\n]"
+        );
+
         write_file(meson_file, updated);
-
-        ui::log(ui::Level::SUCCESS, std::format("Added dependency '{}' to meson.build", dep));
         return true;
     } catch (const std::exception& e) {
         ui::log(ui::Level::ERROR, e.what());
         return false;
     }
+}
+
+bool ProjectGenerator::inject_dependency(const fs::path& root, std::string_view dep_name) {
+    std::string line = std::format("  dependency('{}'),\n", dep_name);
+    bool success = inject_dependency_string(root, line);
+    if (success) ui::log(ui::Level::SUCCESS, std::format("Added dependency '{}'", dep_name));
+    return success;
+}
+
+bool ProjectGenerator::inject_remote(const fs::path& root, const RemoteDep& rd) {
+    try {
+        fs::create_directories(root / "subprojects");
+
+        std::string wrap_content = std::format(
+            "[wrap-git]\n"
+            "url = {}\n"
+            "revision = {}\n"
+            "depth = 1\n"
+            "\n"
+            "[provide]\n"
+            "{} = {}_dep\n",
+            rd.url, rd.revision, rd.name, rd.name
+        );
+        write_file(root / "subprojects" / (rd.name + ".wrap"), wrap_content);
+
+        std::string line = std::format("  dependency('{}', fallback: ['{}', '{}_dep']),\n",
+                                           rd.name, rd.name, rd.name);
+
+        bool success = inject_dependency_string(root, line);
+        if (success) ui::log(ui::Level::SUCCESS, std::format("Added remote dependency '{}'", rd.name));
+        return success;
+    } catch (...) { return false; }
 }
 
 } // namespace fastbuild

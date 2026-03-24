@@ -111,6 +111,22 @@ namespace fastbuild::cli {
                       << "Usage: cd " << name << " && meson setup build && fastbuild --watch\n";
         }
     }
+
+    void handle_add_remote() {
+        RemoteDep rd;
+    std::cout << "Dependency Name: "; std::getline(std::cin, rd.name);
+    std::cout << "GitHub Git URL:  "; std::getline(std::cin, rd.url);
+    std::cout << "Revision/Tag:    "; std::getline(std::cin, rd.revision);
+
+    if (rd.name.empty() || rd.url.empty()) {
+        std::cerr << "Error: Name and URL are required.\n";
+        return;
+    }
+
+    if (ProjectGenerator::inject_remote(".", rd)) {
+        std::cout << "\033[1;32mRemote dependency added and .wrap file created!\033[0m\n";
+    }
+    }
 }
 
 int main(int argc, char* argv[]) {
@@ -140,6 +156,10 @@ int main(int argc, char* argv[]) {
             else if (cmd == "add" && argc >= 3) {
                 ProjectGenerator::inject_dependency(".", args[2]);
                 return 0; // Exit after command
+            }
+            else if (cmd == "add-remote") {
+                fastbuild::cli::handle_add_remote();
+                return 0;
             }
 
             // If we got here, a command was provided but not recognized

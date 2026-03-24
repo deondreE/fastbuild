@@ -24,6 +24,8 @@ namespace fastbuild {
     void generate_raylib();
 
     static bool inject_dependency(const fs::path& root, std::string_view dep);
+    static bool inject_remote(const fs::path& root, const RemoteDep& rd);
+    static bool inject_dependency_string(const fs::path& root, std::string_view raw_dep_line);
   private:
     std::string name_;
     std::vector<std::string> dependencies_;
