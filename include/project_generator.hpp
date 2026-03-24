@@ -12,6 +12,13 @@ namespace fastbuild {
     std::string revision;
   };
 
+  enum class LicenseType {
+    MIT,
+    Apache2,
+    GPL3,
+    Unlicense
+  };
+  
   class ProjectGenerator {
   public:
     explicit ProjectGenerator(std::string_view name) : name_(name) {}
@@ -24,6 +31,9 @@ namespace fastbuild {
     void generate_raylib();
     void generate_gitignore(const fs::path& root);
     void generate_vscode(const fs::path& root);
+    void generate_clang_format(const fs::path& root);
+    void generate_editor_config(const fs::path& root);
+    void generate_license(const fs::path& root, LicenseType type);
 
     static bool inject_dependency(const fs::path& root, std::string_view dep);
     static bool inject_remote(const fs::path& root, const RemoteDep& rd);
