@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Meson
+        run: |
+          pip install meson ninja
+          
+      - name: Build static binary
+        run: |
+          meson setup build --buildtype=release --prefer-static
+          meson compile -C build
+          
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp build/fastbuild dist/
+          cd dist
+          tar czf fastbuild-${{ matrix.os }}.tar.gz fastbuild
+          
+      - name: Upload Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/fastbuild-*.tar.gz
