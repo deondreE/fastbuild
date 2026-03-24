@@ -4,6 +4,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <string_view>
 #include <format>
@@ -358,7 +359,21 @@ bool ProjectGenerator::generate_basic() {
             write_file(wrap_path, wrap_content);
         }
 
-        write_file(root / "pch/pch.hpp", "#include <iostream>\n#include <vector>\n");
+        std::string pch_content = R"(
+                #include <vector>
+                #include <iostream>
+
+                #ifdef _WIN32
+                 #ifdef BUILDING_DLL
+                  #define DLL_API __declspec(dllexport)
+                 #else
+                  #define DLL_API __declspec(dllimport)
+                 #endif
+                #else
+                 #define DLL_API __attribute__((visibility("default")))
+                #endif
+        )";
+        write_file(root / "pch/pch.hpp", pch_content);
 
         write_file(root / "src/main.cpp",
                    "#include \"pch/pch.hpp\"\n\nint main() {\n    return 0;\n}\n");
@@ -385,17 +400,66 @@ bool ProjectGenerator::add_target(const fs::path& root, std::string_view target_
         std::string folder = is_lib ? "src/lib" : "src";
         fs::create_directories(root / folder);
 
-        // Fix path to use the target name correctly
         std::string src_path = std::format("{}/{}.cpp", folder, target_name);
         std::string content = is_lib ? "// Library source\n" : "#include \"pch/pch.hpp\"\n\nint main() {\n    return 0;\n}\n";
         write_file(root / src_path, content);
 
-        std::ofstream ofs(meson_file, std::ios::app);
-        std::string build_block = is_lib ?
-            std::format("\nlibrary('{}', '{}', include_directories: inc, dependencies: project_deps)\n", target_name, src_path) :
-            std::format("\nexecutable('{}', '{}', include_directories: inc, dependencies: project_deps, cpp_pch: 'pch/pch.hpp')\n", target_name, src_path);
+        std::ifstream ifs(meson_file);
+        std::string existing_content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        ifs.close();
 
-        ofs << build_block;
+        if (is_lib) {
+            std::string dep_var = std::format("{}_dep", target_name);
+            std::string lib_build_block = std::format(
+                "{0}_lib = library('{1}', '{2}', include_directories: inc, dependencies: project_deps)\n"
+                "{0}_dep = declare_dependency(link_with: {0}_lib, include_directories: inc)\n\n",
+                target_name, target_name, src_path);
+
+            size_t exe_pos = existing_content.find("executable(");
+            if (exe_pos != std::string::npos) {
+                existing_content.insert(exe_pos, lib_build_block);
+
+                std::regex dep_pattern(R"(dependencies\s*:\s*(?:\[([^\]]*)\]|([a-zA-Z0-9_]+)))");
+                std::smatch match;
+                std::string exe_part = existing_content.substr(exe_pos + lib_build_block.length());
+                
+                if (std::regex_search(exe_part, match, dep_pattern)) {
+                    std::string new_dep_list;
+                    
+                    if (match[1].matched) { // It was already an array [item1, item2]
+                        std::string current_items = match[1].str();
+                        if (current_items.find(dep_var) == std::string::npos) {
+                            std::string sep = (current_items.empty() || current_items.back() == ' ') ? "" : ", ";
+                            new_dep_list = std::format("[{}{}{}]", current_items, sep, dep_var);
+                        }
+                    } else if (match[2].matched) { // It was a single variable like project_deps
+                        std::string var_name = match[2].str();
+                        if (var_name != dep_var) {
+                            new_dep_list = std::format("[{}, {}]", var_name, dep_var);
+                        }
+                    }
+
+                    if (!new_dep_list.empty()) {
+                        std::string full_replacement = "dependencies : " + new_dep_list;
+                        exe_part.replace(match.position(), match.length(), full_replacement);
+                        
+                        // Reconstruct the full content
+                        existing_content = existing_content.substr(0, exe_pos + lib_build_block.length()) + exe_part;
+                    }
+                }
+            } else {
+                existing_content += "\n" + lib_build_block;
+            }
+        } else {
+            // Adding a standard executable
+            std::string exe_block = std::format(
+                "\nexecutable('{}',\n  '{}',\n  include_directories : inc,\n  dependencies : [project_deps],\n  cpp_pch : 'pch/pch.hpp'\n)\n",
+                target_name, src_path);
+            existing_content += exe_block;
+        }
+
+        std::ofstream ofs(meson_file, std::ios::trunc);
+        ofs << existing_content;
 
         ui::log(ui::Level::SUCCESS, std::format("Added {} target: {}", is_lib ? "library" : "executable", target_name));
         return true;
