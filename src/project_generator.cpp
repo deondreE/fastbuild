@@ -14,6 +14,22 @@
 
 namespace fastbuild {
 
+std::string glob_cpp_files(const fs::path& root, const std::string& folder) {
+    std::string files_list = "files(\n";
+    fs::path search_path = root / folder;
+
+    if (fs::exists(search_path)) {
+        for (const auto& entry : fs::recursive_directory_iterator(search_path)) {
+            if (entry.path().extension() == ".cpp") {
+                std::string relative_path = fs::relative(entry.path(), root).string(); 
+                files_list += std::format("   '{}',\n", relative_path);
+            }
+        }
+    }
+    files_list += ")";
+    return files_list;
+}
+
 void ProjectGenerator::write_file(const fs::path& path, std::string_view content) {
     std::ofstream ofs(path, std::ios::out | std::ios::trunc);
     if (!ofs) throw std::runtime_error("Failed to open file for writing: " + path.string());
@@ -35,7 +51,8 @@ std::string ProjectGenerator::build_meson_content() {
 
     std::map<std::string, std::string> data = {
         {"PROJECT_NAME", std::string(name_)},
-        {"DEPS_LIST", deps_section}
+        {"DEPS_LIST", deps_section},
+        {"FILES", glob_cpp_files(name_, "src")},
     };
 
     constexpr std::string_view meson_tmpl = R"(project('{{PROJECT_NAME}}', 'cpp',
@@ -53,7 +70,7 @@ add_project_arguments(cpp.get_supported_arguments([
 inc = include_directories('include')
 
 executable('{{PROJECT_NAME}}',
-  'src/main.cpp',
+  {{FILES}},
   include_directories : inc,
   dependencies : project_deps,
   cpp_pch : 'pch/pch.hpp'
@@ -360,18 +377,18 @@ bool ProjectGenerator::generate_basic() {
         }
 
         std::string pch_content = R"(
-                #include <vector>
-                #include <iostream>
+#include <vector>
+#include <iostream>
 
-                #ifdef _WIN32
-                 #ifdef BUILDING_DLL
-                  #define DLL_API __declspec(dllexport)
-                 #else
-                  #define DLL_API __declspec(dllimport)
-                 #endif
-                #else
-                 #define DLL_API __attribute__((visibility("default")))
-                #endif
+#ifdef _WIN32
+    #ifdef BUILDING_DLL
+        #define DLL_API __declspec(dllexport)
+    #else
+        #define DLL_API __declspec(dllimport)
+    #endif
+#else
+    #define DLL_API __attribute__((visibility("default")))
+#endif
         )";
         write_file(root / "pch/pch.hpp", pch_content);
 
@@ -516,27 +533,82 @@ bool ProjectGenerator::inject_dependency(const fs::path& root, std::string_view 
 
 bool ProjectGenerator::inject_remote(const fs::path& root, const RemoteDep& rd) {
     try {
-        fs::create_directories(root / "subprojects");
+        fs::path subprojects_dir = root / "subprojects";
+        fs::path patch_dir = subprojects_dir / "packagefiles" / rd.name;
+        fs::create_directories(patch_dir);
 
         std::string wrap_content = std::format(
             "[wrap-git]\n"
             "url = {}\n"
             "revision = {}\n"
             "depth = 1\n"
+            "patch_directory = {}\n" 
             "\n"
             "[provide]\n"
             "{} = {}_dep\n",
-            rd.url, rd.revision, rd.name, rd.name
+            rd.url, rd.revision, rd.name, rd.name, rd.name
         );
-        write_file(root / "subprojects" / (rd.name + ".wrap"), wrap_content);
+        write_file(subprojects_dir / (rd.name + ".wrap"), wrap_content);
+
+        std::string synth_meson;
+        if (rd.name == "imgui") {
+            synth_meson = R"(project('imgui', 'cpp', version : '1.89')
+cpp = meson.get_compiler('cpp')
+imgui_inc = include_directories('.', 'backends')
+imgui_deps = [dependency('vulkan')]
+imgui_src = files(
+    'imgui.cpp',
+    'imgui_draw.cpp',
+    'imgui_widgets.cpp',
+    'imgui_tables.cpp',
+    'imgui_demo.cpp',
+    'backends/imgui_impl_glfw.cpp',
+    'backends/imgui_impl_vulkan.cpp'
+)
+
+if host_machine.system() == 'windows'
+    imgui_src += files('backends/imgui_impl_dx12.cpp', 'backends/imgui_impl_win32.cpp')
+    imgui_deps += [cpp.find_library('d3d12'), cpp.find_library('dxgi'), cpp.find_library('d3dcompiler')]
+endif
+
+imgui_lib = static_library('imgui',
+    imgui_src,
+    include_directories : imgui_inc,
+    dependencies : imgui_deps
+)
+
+imgui_dep = declare_dependency(
+    link_with : imgui_lib,
+    include_directories : imgui_inc,
+    dependencies : imgui_deps
+)
+)";
+        }
+        else if (rd.name == "stb") {
+         synth_meson = R"(project('stb', 'cpp', version : '1.0')
+stb_inc = include_directories('.')
+stb_dep = declare_dependency(include_directories : stb_inc)
+)";
+        }
+        else {
+            synth_meson = std::format(
+                "project('{0}', 'cpp', version : '0.1')\n"
+                "{0}_inc = include_directories('.')\n"
+                "{0}_dep = declare_dependency(include_directories : {0}_inc)\n",
+                rd.name
+            );
+        }
+
+         write_file(patch_dir / "meson.build", synth_meson);
 
         std::string line = std::format("  dependency('{}', fallback: ['{}', '{}_dep']),\n",
                                            rd.name, rd.name, rd.name);
 
-        bool success = inject_dependency_string(root, line);
-        if (success) ui::log(ui::Level::SUCCESS, std::format("Added remote dependency '{}'", rd.name));
-        return success;
-    } catch (...) { return false; }
+        return inject_dependency_string(root, line);
+    } catch (const std::exception& e) {
+        ui::log(ui::Level::ERROR, e.what());
+        return false;
+    }
 }
 
 } // namespace fastbuild

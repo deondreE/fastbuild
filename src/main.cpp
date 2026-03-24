@@ -1,5 +1,6 @@
 #include "project_generator.hpp"
 #include "system_check.hpp"
+#include "common.hpp"
 #include "file_watcher.hpp"
 #include <fstream>
 #include <iostream>
@@ -56,6 +57,8 @@ EXAMPLES:
 For more information, see: man fastbuild
 )";
     }
+
+   
     
 
     std::string get_project_name_from_meson()
@@ -172,6 +175,55 @@ For more information, see: man fastbuild
         std::cout << "\033[1;32mRemote dependency added and .wrap file created!\033[0m\n";
     }
     }
+
+    void setup_command(const fs::path& root, std::string_view target_name) {
+        try {
+            fs::path meson_file = root / "meson.build";
+            if (!fs::exists(meson_file)) return;
+
+            // 1. Gather all .cpp files
+            std::vector<std::string> cpp_files;
+            fs::path src_path = root / "src";
+            if (fs::exists(src_path)) {
+                for (const auto& entry : fs::recursive_directory_iterator(src_path)) {
+                    if (entry.is_regular_file() && entry.path().extension() == ".cpp") {
+                        std::string rel = fs::relative(entry.path(), root).string();
+                        cpp_files.push_back(std::format("    '{}'", rel));
+                    }
+                }
+            }
+
+            std::string new_files_list;
+            for (size_t i = 0; i < cpp_files.size(); ++i) {
+                new_files_list += cpp_files[i] + (i == cpp_files.size() - 1 ? "" : ",\n");
+            }
+            std::string new_files_block = std::format("files(\n{}\n  )", new_files_list);
+
+            std::ifstream ifs(meson_file);
+            std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+            ifs.close();
+
+            std::string pattern = std::format(R"(executable\(\s*'{}'\s*,\s*[\s\S]*?(?=\s*[a-zA-Z_]+\s*:))", target_name);
+            std::regex exe_regex(pattern);
+            
+            std::string replacement = std::format("executable('{}', \n  {},\n ", target_name, new_files_block);
+
+            content = std::regex_replace(content, exe_regex, replacement);
+
+            std::ofstream ofs(meson_file, std::ios::trunc);
+            ofs << content;
+            ofs.close();
+
+            std::string build_cmd = fs::exists(root / "build/meson-private/coredata.dat") 
+                ? std::format("meson setup \"{}\" --reconfigure", (root / "build").string())
+                : std::format("meson setup \"{}\" \"{}\"", (root / "build").string(), root.string());
+            
+            std::system(build_cmd.c_str());
+
+        } catch (const std::exception& e) {
+            ui::log(ui::Level::ERROR, std::format("Setup error: {}", e.what()));
+        }
+    }
 }
 
 int main(int argc, char* argv[]) {
@@ -208,6 +260,10 @@ int main(int argc, char* argv[]) {
             }
             if (cmd == "help" || cmd == "--help" || cmd == "-h") {
                 fastbuild::cli::print_help();
+                return 0;
+            }
+            else if (cmd == "setup") {
+                fastbuild::cli::setup_command(".", args[2]);
                 return 0;
             }
 
