@@ -94,12 +94,112 @@ bool ProjectGenerator::generate_basic() {
         write_file(root / "src/main.cpp",
                    "#include \"pch/pch.hpp\"\n\nint main() {\n    return 0;\n}\n");
 
+        generate_gitignore(root);
+        generate_vscode(root);
+
         ui::log(ui::Level::SUCCESS, std::format("Project '{}' created successfully.", name_));
         return true;
     } catch (const std::exception& e) {
         ui::log(ui::Level::ERROR, std::string("Generation error: ") + e.what());
         return false;
     }
+}
+
+void ProjectGenerator::generate_gitignore(const fs::path& root) {
+  std::string gitignore_content = R"(# Build directories
+build/
+builddir/
+subprojects/*
+!subprojects/*.wrap
+
+# Compiled binaries
+*.exe
+*.out
+*.app
+*.so
+*.dylib
+*.dll
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+)";
+
+  write_file(root / ".gitignore", gitignore_content);
+  ui::log(ui::Level::SUCCESS, "Generated .gitignore");
+}
+
+void ProjectGenerator::generate_vscode(const fs::path& root) {
+    fs::create_directories(root / ".vscode");
+     // settings.json
+    std::string settings = R"({
+  "files.associations": {
+    "*.h": "cpp"
+  },
+  "C_Cpp.default.configurationProvider": "mesonbuild.mesonbuild"
+})";
+    write_file(root / ".vscode" / "settings.json", settings);
+
+       std::string tasks = std::format(R"({{
+  "version": "2.0.0",
+  "tasks": [
+    {{
+      "label": "configure",
+      "type": "shell",
+      "command": "meson setup build",
+      "problemMatcher": []
+    }},
+    {{
+      "label": "build",
+      "type": "shell",
+      "command": "meson compile -C build",
+      "group": {{
+        "kind": "build",
+        "isDefault": true
+      }},
+      "problemMatcher": ["$gcc"]
+    }},
+    {{
+      "label": "run",
+      "type": "shell",
+      "command": "${{workspaceFolder}}/build/{}",
+      "dependsOn": ["build"],
+      "problemMatcher": []
+    }}
+  ]
+}})", name_);
+    write_file(root / ".vscode" / "tasks.json", tasks);
+
+    
+    // launch.json
+    std::string launch = std::format(R"({{
+  "version": "0.2.0",
+  "configurations": [
+    {{
+      "name": "Debug",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${{workspaceFolder}}/build/{}",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${{workspaceFolder}}",
+      "environment": [],
+      "externalConsole": false,
+      "MIMode": "gdb",
+      "preLaunchTask": "build"
+    }}
+  ]
+}})", name_);
+    write_file(root / ".vscode" / "launch.json", launch);
+    
+    ui::log(ui::Level::SUCCESS, "Generated .vscode configuration");
 }
 
 bool ProjectGenerator::add_target(const fs::path& root, std::string_view target_name, bool is_lib) {

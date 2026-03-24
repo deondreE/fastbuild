@@ -22,6 +22,8 @@ namespace fastbuild {
 
     bool generate_basic();
     void generate_raylib();
+    void generate_gitignore(const fs::path& root);
+    void generate_vscode(const fs::path& root);
 
     static bool inject_dependency(const fs::path& root, std::string_view dep);
     static bool inject_remote(const fs::path& root, const RemoteDep& rd);
