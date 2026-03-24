@@ -1,5 +1,6 @@
 #include "file_watcher.hpp"
 #include <sys/inotify.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <limits.h>
 #include <iostream>
@@ -61,9 +62,10 @@ void FileWatcher::watch(std::function<void()> callback) {
                 std::cout << "\n\033[1;32m" << "Change detected: " << filename << "\033[0m\n";
                 callback();
 
-                // After running, clear any pending events that built up during the build process
-                // by reading the buffer one more time (Drain the pipe)
+                int flags = fcntl(fd, F_GETFL, 0);
+                fcntl(fd, F_SETFL, flags | O_NONBLOCK);
                 while (read(fd, buffer, sizeof(buffer)) > 0);
+                fcntl(fd, F_SETFL, flags);
 
                 std::cout << "\n\033[1;35m" << ">> Still watching..." << "\033[0m\n";
                 break; // Exit the for-loop to wait for the next fresh event
