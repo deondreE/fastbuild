@@ -13,6 +13,51 @@ using namespace fastbuild;
 
 namespace fastbuild::cli {
 
+    void print_help() {
+         std::cout << R"(
+USAGE:
+    fastbuild [COMMAND] [OPTIONS]
+
+COMMANDS:
+    (no args)              Interactive project scaffolding
+    add <dep>              Add a Meson dependency to project_deps
+    add-remote             Add a remote git dependency (interactive)
+    add-exe <name>         Add a new executable target
+    add-lib <name>         Add a new library target
+    --watch [--run|--debug] Watch for file changes and rebuild
+    doctor                 Check system dependencies
+    help                   Show this help message
+
+OPTIONS:
+    --run                  Auto-run executable after successful build (watch mode)
+    --debug                Attach debugger after successful build (watch mode)
+
+EXAMPLES:
+    # Create new project
+    fastbuild
+
+    # Add dependencies
+    fastbuild add fmt
+    fastbuild add nlohmann_json
+
+    # Add remote dependency
+    fastbuild add-remote
+
+    # Watch and auto-run
+    fastbuild --watch --run
+
+    # Watch with debugger
+    fastbuild --watch --debug
+
+    # Add targets
+    fastbuild add-exe my_tool
+    fastbuild add-lib my_library
+
+For more information, see: man fastbuild
+)";
+    }
+    
+
     std::string get_project_name_from_meson()
     {
         namespace fs = std::filesystem;
@@ -159,6 +204,10 @@ int main(int argc, char* argv[]) {
             }
             else if (cmd == "add-remote") {
                 fastbuild::cli::handle_add_remote();
+                return 0;
+            }
+            if (cmd == "help" || cmd == "--help" || cmd == "-h") {
+                fastbuild::cli::print_help();
                 return 0;
             }
 
