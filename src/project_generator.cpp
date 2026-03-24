@@ -794,4 +794,114 @@ bool ProjectGenerator::inject_remote(const fs::path& root, const RemoteDep& rd) 
     }
 }
 
+std::string ProjectGenerator::inject_dep_into_library(const std::string &content,
+                                    const std::string &lib_name,
+                                    const std::string &dep_var) {
+  std::string needle = "static_library('" + lib_name + "')";
+  std::size_t lib_start = content.find(needle);
+  if (lib_start == std::string::npos) {
+    ui::log(
+        ui::Level::WARN,
+        std::format("static_library('{}') not found in meson.build", lib_name));
+    return content;
+  }
+
+  std::size_t pos = lib_start + needle.size() - 1;
+  int depth = 1;
+  ++pos;
+  std::size_t body_start = pos;
+
+  while (pos < content.size() && depth > 0) {
+    if (content[pos] == '(')
+      ++depth;
+    else if (content[pos] == ')')
+      --depth;
+    ++pos;
+  }
+  std::string body = content.substr(body_start, pos - body_start - 1);
+
+  if (body.find(dep_var) != std::string::npos) {
+    ui::log(ui::Level::WARN,
+            std::format("'{}' already in dependencies of library '{}'", dep_var,
+                        lib_name));
+    return content;
+  }
+
+  std::regex dep_key(R"(dependencies\s*:\s*)");
+  std::smatch m;
+  if (!std::regex_search(body, m, dep_key)) {
+    body += ",\n  dependencies        : [" + dep_var + "]";
+  } else {
+    std::size_t value_start = m.position() + m.length();
+    while (value_start < body.size() &&
+           std::isspace((unsigned char)body[value_start]))
+      ++value_start;
+
+    if (value_start < body.size() && body[value_start] == '[') {
+      std::size_t bracket_close = body.find(']', value_start);
+      if (bracket_close != std::string::npos) {
+        std::size_t insert_at = bracket_close;
+        while (insert_at > value_start &&
+               (body[insert_at - 1] == ' ' || body[insert_at - 1] == '\n' ||
+                body[insert_at - 1] == '\t'))
+          --insert_at;
+        bool has_coma = (insert_at > value_start && body[insert_at - 1] == ',');
+        body.insert(insert_at, (has_coma ? " " : ", ") + dep_var);
+      }
+    } else {
+      std::size_t var_end = value_start;
+      while (
+          var_end < body.size() &&
+          (std::isalnum((unsigned char)body[var_end]) || body[var_end] == '_'))
+        ++var_end;
+      std::string orig = body.substr(value_start, var_end - value_start);
+      body.replace(value_start, var_end - value_start,
+                   "[" + orig + ", " + dep_var + "]");
+    }
+  }
+
+  return content.substr(0, body_start) + body + ")" + content.substr(pos);
+}
+
+bool ProjectGenerator::inject_dependency_into_target(const fs::path &root,
+                                              std::string_view target_name,
+                                              std::string_view dep_name) {
+  try {
+    fs::path meson_file = root / "meson.build";
+    if (!fs::exists(meson_file)) {
+      ui::log(ui::Level::ERROR, "No meson.build found in: " + root.string());
+      return false;
+    }
+
+    std::string content = read_file(meson_file);
+
+    std::string dep_token;
+    std::string dep_str(dep_name);
+    bool is_var_ref =
+        (dep_str.size() > 4 && dep_str.substr(dep_str.size() - 4) == "_dep") ||
+        dep_str.find('\'') != std::string::npos;
+
+    if (is_var_ref) {
+      dep_token = dep_str;
+    } else {
+      dep_token = std::format("dependency('{}')", dep_str);
+    }
+
+    std::string patched =
+        inject_dep_into_library(content, std::string(target_name), dep_token);
+
+    if (patched == content) {
+      return false;
+    }
+
+    write_file(meson_file, patched);
+    ui::log(ui::Level::SUCCESS,
+            std::format("Added '{}' to library '{}'", dep_token, target_name));
+    return true;
+  } catch (const std::exception &e) {
+    ui::log(ui::Level::ERROR, e.what());
+    return false;
+  }
+}
+
 } // namespace fastbuild

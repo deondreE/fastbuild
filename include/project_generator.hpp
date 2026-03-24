@@ -38,6 +38,10 @@ namespace fastbuild {
     static bool inject_dependency(const fs::path& root, std::string_view dep);
     static bool inject_remote(const fs::path& root, const RemoteDep& rd);
     static bool inject_dependency_string(const fs::path& root, std::string_view raw_dep_line);
+    static bool inject_dependency_into_target(const fs::path &root,
+                                              std::string_view target_name,
+                                              std::string_view dep_name);
+
   private:
     std::string name_;
     std::vector<std::string> dependencies_;
@@ -46,7 +50,11 @@ namespace fastbuild {
     static void write_file(const fs::path& path, std::string_view content);
     void write_wrap_file(const fs::path& path, const RemoteDep& rd);
     std::string sythesize_meson(std::string_view name);
-   static std::string inject_dep_into_executable(const std::string& content, const std::string& dep_var);
+    static std::string inject_dep_into_executable(const std::string &content,
+                                                  const std::string &dep_var);
     std::string build_meson_content();
+    static std::string inject_dep_into_library(const std::string &content,
+                                               const std::string &lib_name,
+                                               const std::string &dep_var);
   };
 }

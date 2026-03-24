@@ -266,7 +266,11 @@ int main(int argc, char* argv[]) {
                 fastbuild::cli::setup_command(".", args[2]);
                 return 0;
             }
-
+            else if (cmd == "add-dep" && argc >= 4) {
+              ProjectGenerator::inject_dependency_into_target(".", args[2],
+                                                              args[3]);
+              return 0;
+            }
             // If we got here, a command was provided but not recognized
             std::cerr << "\033[1;31mUnknown command: " << cmd << "\033[0m\n";
             return 1;
